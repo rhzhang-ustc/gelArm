@@ -11,3 +11,7 @@ sensors streamed from a Raspberry Pi.
 | [`marker_track/`](marker_track/README.md) | Real-time marker tracker for the gel surface. Wraps a fast C++ DFS matcher (`find_marker.so`, built from `src/tracking_class.cpp`) with Python helpers and two scripts: `calibrate.py` (one-time per sensor) and `demo.py` (live tracking + flow visualization). |
 
 See the per-folder READMEs for setup, build instructions, and usage details.
+
+## References
+
+- [gs_sdk](https://github.com/joehjhuang/gs_sdk/tree/master) — GelSight SDK, useful reference for sensor calibration and processing.
