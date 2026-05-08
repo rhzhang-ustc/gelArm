@@ -25,3 +25,7 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+
+# Captured frames (raw images, large; not tracked)
+image_preprocess/captures/
+image_preprocess/camera_calibration/captures/

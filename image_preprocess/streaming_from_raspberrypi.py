@@ -2,26 +2,34 @@
 
 Layout: live frame on the left, a "Save image" button (and saved-file
 status) on the right. Click the button to write the current frame to
-`captures/capture_<timestamp>.png`.
+`captures/capture_<timestamp>.png` (the *displayed* frame, so undistorted
+if --undistort was passed).
 
-Requirements: opencv-python, pillow (`pip install pillow`).
+Optional fisheye undistortion: pass --undistort to apply a saved
+calibration before display. The default is OFF.
+
+Requirements: opencv-python, numpy, pillow (`pip install pillow`).
 
 Usage:
     python streaming_from_raspberrypi.py
-    python streaming_from_raspberrypi.py --stream http://<host>:<port>/stream.mjpg
-    python streaming_from_raspberrypi.py --save-dir my_captures
+    python streaming_from_raspberrypi.py --undistort
+    python streaming_from_raspberrypi.py --undistort --calibration <path.json>
 """
 
 import argparse
+import json
 import threading
 import time
 from pathlib import Path
 
 import cv2
+import numpy as np
 import tkinter as tk
 from PIL import Image, ImageTk
 
+HERE = Path(__file__).parent
 DEFAULT_STREAM = "http://10.194.110.225:8000/stream.mjpg"
+DEFAULT_CALIB = HERE / "camera_calibration" / "fisheye_params.json"
 
 
 def parse_args():
@@ -34,6 +42,11 @@ def parse_args():
                    help="Subdirectory (under this script) to write captures into")
     p.add_argument("--display-fps", type=float, default=30.0,
                    help="GUI refresh rate (default: 30)")
+    p.add_argument("--undistort", action="store_true",
+                   help="apply fisheye undistortion before display "
+                        "(default: off)")
+    p.add_argument("--calibration", default=str(DEFAULT_CALIB),
+                   help=f"path to fisheye_params.json (default: {DEFAULT_CALIB})")
     return p.parse_args()
 
 
@@ -46,11 +59,58 @@ def normalize_stream_url(url):
     return url
 
 
+class FisheyeUndistorter:
+    """Lazily build undistortion maps sized to the actual incoming frames.
+
+    The saved calibration includes the image size it was computed at; if
+    incoming frames are a different size (e.g. resized stream), K is
+    scaled accordingly so undistortion still applies correctly.
+    """
+
+    def __init__(self, calibration_path):
+        path = Path(calibration_path)
+        if not path.exists():
+            raise SystemExit(
+                f"[stream] --undistort requested but no calibration at {path}. "
+                "Run camera_calibration/calibrate_fisheye.py first."
+            )
+        data = json.loads(path.read_text())
+        self.K_cal = np.asarray(data["K"], dtype=np.float64)
+        self.D = np.asarray(data["D"], dtype=np.float64).reshape(-1, 1)
+        self.cal_size = tuple(data["image_size"])  # (w, h)
+        self._maps = None
+        self._maps_size = None
+        print(f"[stream] loaded fisheye calibration from {path} "
+              f"(size {self.cal_size}, RMS {data.get('rms_error_px', '?')})")
+
+    def _build_maps(self, frame_size):
+        cw, ch = self.cal_size
+        fw, fh = frame_size
+        K = self.K_cal.copy()
+        if (fw, fh) != (cw, ch):
+            sx, sy = fw / cw, fh / ch
+            K[0, 0] *= sx
+            K[1, 1] *= sy
+            K[0, 2] *= sx
+            K[1, 2] *= sy
+            print(f"[stream] frame {fw}x{fh} != calib {cw}x{ch}; scaled K")
+        return cv2.fisheye.initUndistortRectifyMap(
+            K, self.D, np.eye(3), K, (fw, fh), cv2.CV_16SC2)
+
+    def __call__(self, frame):
+        h, w = frame.shape[:2]
+        if self._maps is None or self._maps_size != (w, h):
+            self._maps = self._build_maps((w, h))
+            self._maps_size = (w, h)
+        return cv2.remap(frame, self._maps[0], self._maps[1],
+                         interpolation=cv2.INTER_LINEAR,
+                         borderMode=cv2.BORDER_CONSTANT)
+
+
 class FrameReader:
     """Background thread reading frames as fast as the source provides."""
 
     def __init__(self, url):
-        self._url = url
         self._cap = cv2.VideoCapture(url)
         if not self._cap.isOpened():
             raise SystemExit(f"Could not open stream {url!r}")
@@ -82,27 +142,32 @@ class FrameReader:
 def main():
     args = parse_args()
     stream_url = normalize_stream_url(args.stream)
-    save_dir = Path(__file__).parent / args.save_dir
+    save_dir = HERE / args.save_dir
     save_dir.mkdir(exist_ok=True, parents=True)
+
+    undistort = FisheyeUndistorter(args.calibration) if args.undistort else None
 
     reader = FrameReader(stream_url)
     print(f"[stream] connected to {stream_url}")
+    print(f"[stream] undistort: {'ON' if undistort else 'off'}")
     print(f"[stream] saves go to {save_dir}")
 
     root = tk.Tk()
-    root.title("Raspberry Pi camera")
-
-    img_label = tk.Label(root, bg="black", width=320, height=240)
-    img_label.pack(side=tk.LEFT, padx=10, pady=10)
+    title_suffix = " (undistorted)" if undistort else ""
+    root.title(f"Raspberry Pi camera{title_suffix}")
 
     side = tk.Frame(root)
     side.pack(side=tk.RIGHT, padx=10, pady=10, fill=tk.Y)
 
+    img_label = tk.Label(root, bg="black")
+    img_label.pack(side=tk.LEFT, padx=10, pady=10, expand=True, fill=tk.BOTH)
+
     status_var = tk.StringVar(value="(no captures yet)")
     saved_count = {"n": 0}
+    displayed = {"frame": None}
 
     def on_save():
-        frame = reader.latest()
+        frame = displayed["frame"]
         if frame is None:
             status_var.set("No frame yet")
             return
@@ -121,12 +186,18 @@ def main():
     tk.Label(side, textvariable=status_var,
              wraplength=200, justify=tk.LEFT).pack(pady=5)
     tk.Label(side, text="(spacebar also saves)", fg="gray").pack(pady=10)
+    if undistort:
+        tk.Label(side, text="undistort: ON",
+                 fg="green").pack(pady=2)
 
     interval_ms = max(1, int(1000 / args.display_fps))
 
     def refresh():
         frame = reader.latest()
         if frame is not None:
+            if undistort is not None:
+                frame = undistort(frame)
+            displayed["frame"] = frame
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             photo = ImageTk.PhotoImage(Image.fromarray(rgb))
             img_label.config(image=photo, width=photo.width(),
