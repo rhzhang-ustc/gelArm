@@ -1,5 +1,0 @@
----
-triple:          'arm64-apple-darwin'
-binary-path:     'src/lib/find_marker.cpython-312-darwin.so'
-relocations:     []
-...

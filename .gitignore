@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Compiled extensions
+*.so
+*.dylib
+*.dll
+*.o
+*.a
+
+# Debug symbols (macOS)
+*.dSYM/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
